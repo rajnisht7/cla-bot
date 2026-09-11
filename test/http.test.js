@@ -766,44 +766,53 @@ function fakeResponse(status, jsonBody, headers = {}) {
   });
 
   await test("writeSignatures gives up after repeatedly hitting 409 conflicts (4 attempts) and throws, instead of retrying forever", async () => {
+    const originalSetTimeout = global.setTimeout;
+    // writeSignatures' own retry backoff (attempt * 800ms: 800/1600/2400ms
+    // between the 4 attempts) is separate from gh()'s transient-retry
+    // backoff - stub it too, or this single test adds ~4.8s to every run.
+    global.setTimeout = (fn) => originalSetTimeout(fn, 0);
     let putAttempts = 0;
-    global.fetch = async (url, opts) => {
-      const method = (opts && opts.method) || "GET";
-      if (method === "PUT") {
-        putAttempts += 1;
-        return fakeResponse(409, { message: "Conflict" });
-      }
-      // Every re-read looks the same - the point is that the writer NEVER
-      // wins, no matter how many times it retries.
-      return fakeResponse(200, {
-        sha: "always-stale-sha",
-        content: b64({ version: 1, signatures: [] }),
-        encoding: "base64",
-      });
-    };
-    let caught = null;
     try {
-      await writeSignatures(
-        "tok",
-        (data) => ({
-          ...data,
-          signatures: [...data.signatures, { login: "someone" }],
-        }),
-        "someone signs",
+      global.fetch = async (url, opts) => {
+        const method = (opts && opts.method) || "GET";
+        if (method === "PUT") {
+          putAttempts += 1;
+          return fakeResponse(409, { message: "Conflict" });
+        }
+        // Every re-read looks the same - the point is that the writer NEVER
+        // wins, no matter how many times it retries.
+        return fakeResponse(200, {
+          sha: "always-stale-sha",
+          content: b64({ version: 1, signatures: [] }),
+          encoding: "base64",
+        });
+      };
+      let caught = null;
+      try {
+        await writeSignatures(
+          "tok",
+          (data) => ({
+            ...data,
+            signatures: [...data.signatures, { login: "someone" }],
+          }),
+          "someone signs",
+        );
+      } catch (e) {
+        caught = e;
+      }
+      assert.ok(
+        caught,
+        "expected writeSignatures to eventually give up and throw, not retry forever",
       );
-    } catch (e) {
-      caught = e;
+      assert.strictEqual(caught.status, 409);
+      assert.strictEqual(
+        putAttempts,
+        4,
+        "expected exactly 4 PUT attempts (the hardcoded retry cap) before giving up",
+      );
+    } finally {
+      global.setTimeout = originalSetTimeout;
     }
-    assert.ok(
-      caught,
-      "expected writeSignatures to eventually give up and throw, not retry forever",
-    );
-    assert.strictEqual(caught.status, 409);
-    assert.strictEqual(
-      putAttempts,
-      4,
-      "expected exactly 4 PUT attempts (the hardcoded retry cap) before giving up",
-    );
   });
 
   await test("writeSignatures does NOT retry a non-conflict PUT failure (e.g. 403 permissions error) - it throws immediately", async () => {

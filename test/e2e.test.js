@@ -24,6 +24,17 @@ const path = require("node:path");
 const REPO_ROOT = path.join(__dirname, "..");
 const SCRIPT = path.join(REPO_ROOT, "src", "cla-bot.js");
 
+// A single, securely-created temp directory for this whole test run.
+// fs.mkdtempSync (unlike hand-building a path in the shared, world-writable
+// os.tmpdir() with a timestamp/random suffix) creates a directory with an
+// unguessable name and owner-only permissions (mode 0o700 on POSIX), which
+// avoids the predictable-shared-tmp-path class of issues (symlink races,
+// other local users reading/tampering with the file before we use it).
+const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "cla-bot-e2e-"));
+process.on("exit", () => {
+  fs.rmSync(TMP_DIR, { recursive: true, force: true });
+});
+
 let passed = 0;
 async function test(name, fn) {
   try {
@@ -38,8 +49,8 @@ async function test(name, fn) {
 
 function writeTempEventFile(payload) {
   const file = path.join(
-    os.tmpdir(),
-    `cla-bot-e2e-event-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
+    TMP_DIR,
+    `event-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
   );
   fs.writeFileSync(file, JSON.stringify(payload));
   return file;
@@ -269,10 +280,7 @@ function baseEnv(apiUrl) {
     // overridable property - so a tiny wrapper script sets it to look like
     // an old Node before requiring the real file, exercising the exact
     // same code path a real old-Node run would hit.
-    const wrapper = path.join(
-      os.tmpdir(),
-      `cla-bot-e2e-oldnode-wrapper-${Date.now()}.js`,
-    );
+    const wrapper = path.join(TMP_DIR, `oldnode-wrapper-${Date.now()}.js`);
     fs.writeFileSync(
       wrapper,
       [

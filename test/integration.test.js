@@ -1729,7 +1729,7 @@ function makeFakeGitHub({
     );
   });
 
-  await test("listPRCommitAuthors correctly stops when a page comes back completely empty (exactly a multiple of 100 total commits)", async () => {
+  await test("listPRCommitAuthors terminates by fetching one genuinely empty page when the total commit count is an exact multiple of 100 (doesn't hang or keep paging forever)", async () => {
     const commits = [];
     for (let i = 0; i < 200; i++) {
       commits.push({
@@ -1739,17 +1739,35 @@ function makeFakeGitHub({
         commit: { author: { email: `a${i}@example.com` } },
       });
     }
+    // Everyone already signed - this test isolates pagination termination
+    // itself (page request count/sequence), not signer detection, which is
+    // already covered by the >100-commits test above.
     const initialSignatures = {
       version: 1,
-      // Everyone signs except the very last commit's author (page 3, which
-      // would otherwise come back empty and never get inspected if the
-      // "page came back empty" exit condition were broken).
-      signatures: commits
-        .slice(0, 199)
-        .map((c) => ({ id: c.author.id, login: c.author.login })),
+      signatures: commits.map((c) => ({
+        id: c.author.id,
+        login: c.author.login,
+      })),
     };
     const gh = makeFakeGitHub({ commits, initialSignatures });
-    global.fetch = gh.fetch;
+    const innerFetch = gh.fetch;
+    const pageRequests = [];
+    global.fetch = async (url, opts) => {
+      const m = url.match(/\/pulls\/1\/commits\?.*[&?]page=(\d+)/);
+      if (m) {
+        const pageNum = Number(m[1]);
+        pageRequests.push(pageNum);
+        // If the empty-page termination branch ever regresses, this turns
+        // an infinite-loop hang into an immediate, clear test failure
+        // instead of timing out the whole suite.
+        if (pageNum > 3) {
+          throw new Error(
+            `pagination did not terminate - requested page ${pageNum}, expected it to stop right after the empty page 3`,
+          );
+        }
+      }
+      return innerFetch(url, opts);
+    };
 
     const payload = {
       action: "opened",
@@ -1757,12 +1775,12 @@ function makeFakeGitHub({
     };
     await handlePullRequestTarget(payload);
 
-    assert.strictEqual(gh.statuses[gh.statuses.length - 1].state, "failure");
-    const lastComment = gh.comments[gh.comments.length - 1].body;
-    assert.ok(
-      lastComment.includes("@author-199"),
-      "the last commit (exactly on the 200/100=2 page boundary) must still be found and required to sign",
+    assert.deepStrictEqual(
+      pageRequests,
+      [1, 2, 3],
+      "expected exactly 3 page requests - two full 100-item pages, then one genuinely empty page to terminate - not more and not fewer",
     );
+    assert.strictEqual(gh.statuses[gh.statuses.length - 1].state, "success");
   });
 
   console.log(`\n${passed} test(s) passed.`);
