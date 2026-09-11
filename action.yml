@@ -85,4 +85,11 @@ runs:
         SIG_APP_ID: ${{ inputs.app-id }}
         SIG_APP_PRIVATE_KEY: ${{ inputs.app-private-key }}
         REQUIRE_VERIFIED_COMMITS: ${{ inputs.require-verified-commits }}
-      run: node "${{ github.action_path }}/src/cla-bot.js"
+        # Passed through env, not interpolated directly into `run:` below -
+        # a `${{ }}` expression inside a `run:` script is substituted as raw
+        # text before bash ever sees it, so any value that can reach it is a
+        # potential script-injection sink. Routing it through env instead
+        # means bash receives it as an actual environment variable value,
+        # never as script text, regardless of what it contains.
+        ACTION_PATH: ${{ github.action_path }}
+      run: node "$ACTION_PATH/src/cla-bot.js"
