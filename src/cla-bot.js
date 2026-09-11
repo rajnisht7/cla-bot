@@ -151,8 +151,10 @@ function assertValidPRNumber(value, context) {
 // in their place, so this deliberately doesn't require hex - it only
 // rejects what would actually be dangerous as a URL path segment: slashes,
 // "..", "?"/"#" (which would truncate or redirect the request path/query),
-// and whitespace/control characters.
-const UNSAFE_URL_SEGMENT_RE = /[/\\?#\s\x00-\x1f]|\.\./;
+// whitespace/control characters, and "%" (blocks a percent-encoded
+// bypass of the checks above, e.g. "%2e%2e" or "%2f" - a real SHA never
+// contains one either way, so this costs nothing).
+const UNSAFE_URL_SEGMENT_RE = /[/\\?#%\s\x00-\x1f]|\.\./;
 function assertValidSha(value, context) {
   if (
     typeof value !== "string" ||
@@ -721,6 +723,11 @@ async function getExistingBotComments(prNumber) {
 }
 
 async function postComment(prNumber, body, dedupe = true) {
+  // Defense-in-depth: postComment is exported and callable directly (not
+  // only via the validated handleIssueComment/handlePullRequestTarget entry
+  // points), so it re-checks its own input rather than trusting every
+  // caller to have validated it first.
+  assertValidPRNumber(prNumber, "postComment(prNumber)");
   const full = `${BOT_MARKER}\n${body}`;
   if (dedupe) {
     const existing = await getExistingBotComments(prNumber);
@@ -807,6 +814,12 @@ async function setStatus(sha, state, description) {
 
 async function lockPR(prNumber) {
   try {
+    // Defense-in-depth, same reasoning as postComment(): lockPR is exported
+    // and callable directly. Validating inside the try means a bad
+    // prNumber is handled exactly like any other lock failure - logged and
+    // swallowed, never thrown - keeping lockPR's "never fails the run"
+    // contract intact.
+    assertValidPRNumber(prNumber, "lockPR(prNumber)");
     await gh(
       `/repos/${REPO_OWNER}/${REPO_NAME}/issues/${prNumber}/lock`,
       GITHUB_TOKEN,
