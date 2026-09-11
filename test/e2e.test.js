@@ -60,7 +60,7 @@ function runScript(env, { timeoutMs = 10000 } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [SCRIPT], {
       cwd: REPO_ROOT,
-      env: { ...process.env, ...env },
+      env: buildChildEnv(env),
     });
     let stdout = "";
     let stderr = "";
@@ -81,12 +81,76 @@ function runScript(env, { timeoutMs = 10000 } = {}) {
   });
 }
 
-// A minimal fake GitHub API, just enough to let a full run complete.
+// Every environment variable src/cla-bot.js reads, explicitly defaulted to
+// "" (which every `process.env.X || fallback`/`process.env.X || ""` read in
+// the source treats the same as unset).
+//
+// Deliberately NOT `{ ...process.env, ...overrides }`: spreading the
+// parent's real environment would let anything the ambient shell/CI
+// happens to export (SIG_APP_ID, SIG_APP_PRIVATE_KEY, GITHUB_TOKEN,
+// REQUIRE_VERIFIED_COMMITS, ...) leak into the child and silently change
+// which code path it takes - e.g. a developer with SIG_APP_ID/
+// SIG_APP_PRIVATE_KEY set locally would flip the script from the plain
+// GITHUB_TOKEN path into GitHub App authentication, which calls
+// /repos/.../installation and /app/installations/.../access_tokens that
+// this test's fake server doesn't implement, causing an unrelated failure
+// that only reproduces on that one machine. Only a small, explicit
+// allowlist of OS-level variables Node itself needs to actually run is
+// passed through.
+const OS_PASSTHROUGH_VARS = [
+  "PATH",
+  "HOME",
+  "TMPDIR",
+  "TEMP",
+  "TMP",
+  "SystemRoot",
+  "windir",
+];
+const CLA_BOT_ENV_VARS = [
+  "GITHUB_API_URL",
+  "GITHUB_EVENT_NAME",
+  "GITHUB_EVENT_PATH",
+  "GITHUB_REPOSITORY",
+  "GITHUB_TOKEN",
+  "REQUIRE_VERIFIED_COMMITS",
+  "SIG_APP_ID",
+  "SIG_APP_PRIVATE_KEY",
+  "SIG_OWNER",
+  "SIG_REPO",
+  "SIG_PATH",
+  "CLA_DOCUMENT_URL",
+  "ALLOWLIST",
+];
+function buildChildEnv(overrides) {
+  const env = {};
+  for (const key of OS_PASSTHROUGH_VARS) {
+    if (process.env[key] !== undefined) env[key] = process.env[key];
+  }
+  for (const key of CLA_BOT_ENV_VARS) {
+    env[key] = "";
+  }
+  return { ...env, ...overrides };
+}
+
+// A minimal fake GitHub API, just enough to let a full run complete. Keeps
+// real, mutable state for the signatures file and posted statuses (rather
+// than always returning a fixed canned response) so a PUT actually changes
+// what a later GET returns in the same run - otherwise a test could see
+// "a write happened" and pass even if that write was never actually
+// persisted or read back correctly by the rest of the flow.
 function startFakeGitHub({ authorAlreadySigned }) {
   const requestsSeen = [];
+  const statusesSeen = [];
+  let signaturesState = {
+    sha: "sig-sha-0",
+    data: {
+      version: 1,
+      signatures: authorAlreadySigned ? [{ id: 42, login: "e2e-author" }] : [],
+    },
+  };
   const server = http.createServer((req, res) => {
-    let body = "";
-    req.on("data", (c) => (body += c));
+    let rawBody = "";
+    req.on("data", (c) => (rawBody += c));
     req.on("end", () => {
       requestsSeen.push({ method: req.method, url: req.url });
       const send = (status, obj) => {
@@ -112,24 +176,57 @@ function startFakeGitHub({ authorAlreadySigned }) {
       }
       if (req.url.includes("/contents/signatures/cla.json")) {
         if (req.method === "GET") {
-          const signatures = authorAlreadySigned
-            ? [{ id: 42, login: "e2e-author" }]
-            : [];
           const content = Buffer.from(
-            JSON.stringify({ version: 1, signatures }),
+            JSON.stringify(signaturesState.data),
           ).toString("base64");
-          return send(200, { sha: "sig-sha", content, encoding: "base64" });
+          return send(200, {
+            sha: signaturesState.sha,
+            content,
+            encoding: "base64",
+          });
         }
         if (req.method === "PUT") {
-          return send(200, { content: { sha: "sig-sha-2" } });
+          let payload;
+          try {
+            payload = JSON.parse(rawBody);
+          } catch {
+            return send(400, { message: "malformed PUT body" });
+          }
+          // Real compare-and-swap semantics: reject a stale sha exactly
+          // like GitHub does, so a PUT can't silently "succeed" against
+          // state it never actually read.
+          if ((payload.sha || null) !== signaturesState.sha) {
+            return send(409, { message: "sha does not match" });
+          }
+          const newData = JSON.parse(
+            Buffer.from(payload.content, "base64").toString("utf8"),
+          );
+          const newSha = `sig-sha-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+          signaturesState = { sha: newSha, data: newData };
+          return send(200, { content: { sha: newSha } });
         }
       }
       if (req.url.includes("/statuses/")) {
+        let payload = {};
+        try {
+          payload = JSON.parse(rawBody);
+        } catch {
+          /* leave payload as {} - still record that a status was posted */
+        }
+        statusesSeen.push({ ...payload, sha: req.url.split("/statuses/")[1] });
         return send(201, {});
       }
       if (req.url.includes("/issues/1/comments")) {
         if (req.method === "GET") return send(200, []);
-        if (req.method === "POST") return send(201, { id: 1, body: "" });
+        if (req.method === "POST") {
+          let payload = {};
+          try {
+            payload = JSON.parse(rawBody);
+          } catch {
+            /* leave payload as {} */
+          }
+          return send(201, { id: 1, body: payload.body || "" });
+        }
       }
       if (/\/user$/.test(req.url)) {
         return send(404, { message: "Not Found" }); // forces the default bot-login fallback
@@ -147,6 +244,8 @@ function startFakeGitHub({ authorAlreadySigned }) {
       resolve({
         url: `http://127.0.0.1:${port}`,
         requestsSeen,
+        statusesSeen,
+        getSignatures: () => signaturesState.data,
         close: () => new Promise((r) => server.close(r)),
       });
     });
@@ -184,9 +283,20 @@ function baseEnv(apiUrl) {
         0,
         `expected exit code 0, got ${code}. stderr:\n${stderr}`,
       );
-      assert.ok(
-        server.requestsSeen.some((r) => r.url.includes("/statuses/")),
-        "expected the real CLI run to have posted a commit status",
+      assert.strictEqual(
+        server.statusesSeen.length,
+        1,
+        "expected exactly one commit status to be posted",
+      );
+      assert.strictEqual(
+        server.statusesSeen[0].state,
+        "success",
+        `expected a "success" status since the author already signed, got: ${JSON.stringify(server.statusesSeen[0])}`,
+      );
+      assert.strictEqual(
+        server.statusesSeen[0].sha,
+        "e2e-head-sha",
+        "the status must be posted against the PR's actual head sha",
       );
     } finally {
       await server.close();
@@ -232,7 +342,7 @@ function baseEnv(apiUrl) {
     );
   });
 
-  await test("main() runs a full issue_comment 'created' (sign phrase) event end-to-end via the real CLI entrypoint and exits 0", async () => {
+  await test("main() runs a full issue_comment 'created' (sign phrase) event end-to-end via the real CLI entrypoint: the write is actually persisted and read back, ending in a 'success' status", async () => {
     const server = await startFakeGitHub({ authorAlreadySigned: false });
     const eventFile = writeTempEventFile({
       action: "created",
@@ -259,6 +369,8 @@ function baseEnv(apiUrl) {
         0,
         `expected exit code 0, got ${code}. stderr:\n${stderr}`,
       );
+
+      // The PUT actually happened...
       assert.ok(
         server.requestsSeen.some(
           (r) =>
@@ -266,6 +378,30 @@ function baseEnv(apiUrl) {
             r.url.includes("/contents/signatures/cla.json"),
         ),
         "expected the sign phrase to result in a real write to the signatures file",
+      );
+      // ...and was genuinely persisted (not just accepted and discarded) -
+      // the fake server's own state now has the signer in it.
+      assert.ok(
+        server
+          .getSignatures()
+          .signatures.some((s) => s.id === 42 && s.login === "e2e-author"),
+        "the signer must actually be present in the (fake) signatures store after signing",
+      );
+      // ...and checkPR(), which re-reads signatures right after the write,
+      // must have picked up that fresh state rather than a stale read -
+      // the resulting status has to be "success", not "failure". This is
+      // the part a test that only checks "a PUT happened" would miss
+      // entirely if the write were silently discarded by a broken fake
+      // server (or a broken real implementation).
+      assert.strictEqual(
+        server.statusesSeen.length,
+        1,
+        "expected exactly one commit status to be posted",
+      );
+      assert.strictEqual(
+        server.statusesSeen[0].state,
+        "success",
+        `expected "success" after the only commit author signed, got: ${JSON.stringify(server.statusesSeen[0])}`,
       );
     } finally {
       await server.close();
@@ -293,7 +429,7 @@ function baseEnv(apiUrl) {
       const { code, stderr } = await new Promise((resolve, reject) => {
         const child = spawn(process.execPath, [wrapper], {
           cwd: REPO_ROOT,
-          env: { ...process.env, ...baseEnv("http://127.0.0.1:1") },
+          env: buildChildEnv(baseEnv("http://127.0.0.1:1")),
         });
         let stderrOut = "";
         child.stderr.on("data", (d) => (stderrOut += d));
@@ -311,6 +447,47 @@ function baseEnv(apiUrl) {
       );
     } finally {
       fs.unlinkSync(wrapper);
+    }
+  });
+
+  await test("main() is hermetic: an ambient SIG_APP_ID/SIG_APP_PRIVATE_KEY in the parent environment does NOT leak into the child and does NOT switch it into GitHub App auth", async () => {
+    // Regression guard for the env-passthrough bug itself: temporarily set
+    // these in *this* process's env (simulating a developer/CI machine
+    // that happens to export them for unrelated reasons) and confirm the
+    // child still takes the plain GITHUB_TOKEN path against a fake server
+    // that would immediately 500 on the App-auth endpoints.
+    const server = await startFakeGitHub({ authorAlreadySigned: true });
+    const eventFile = writeTempEventFile({
+      action: "opened",
+      pull_request: { number: 1, head: { sha: "e2e-head-sha" } },
+    });
+    const previousAppId = process.env.SIG_APP_ID;
+    const previousAppKey = process.env.SIG_APP_PRIVATE_KEY;
+    process.env.SIG_APP_ID = "999999";
+    process.env.SIG_APP_PRIVATE_KEY =
+      "-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----";
+    try {
+      const { code, stderr } = await runScript({
+        ...baseEnv(server.url),
+        GITHUB_EVENT_NAME: "pull_request_target",
+        GITHUB_EVENT_PATH: eventFile,
+      });
+      assert.strictEqual(
+        code,
+        0,
+        `expected exit code 0 (ambient SIG_APP_ID/KEY must not leak into the child), got ${code}. stderr:\n${stderr}`,
+      );
+      assert.ok(
+        !server.requestsSeen.some((r) => r.url.includes("/installation")),
+        "the child must not have attempted GitHub App installation lookup - SIG_APP_ID/KEY should not have leaked in",
+      );
+    } finally {
+      if (previousAppId === undefined) delete process.env.SIG_APP_ID;
+      else process.env.SIG_APP_ID = previousAppId;
+      if (previousAppKey === undefined) delete process.env.SIG_APP_PRIVATE_KEY;
+      else process.env.SIG_APP_PRIVATE_KEY = previousAppKey;
+      await server.close();
+      fs.unlinkSync(eventFile);
     }
   });
 
