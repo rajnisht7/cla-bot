@@ -109,8 +109,7 @@ but double-check if you've modified it.
 
 ### 1.6 Sign and confirm
 
-Reply to the bot's comment with exactly this text - a plain new comment
-will not count:
+Reply to the bot's comment with exactly this text:
 
 ```
 I have read the CLA Document and I hereby sign the CLA

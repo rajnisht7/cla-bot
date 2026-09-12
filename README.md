@@ -18,7 +18,7 @@ break or get abandoned.
    it comments with instructions and marks the PR's `cla/fossasia` check as
    failing.
 3. The contributor replies to the bot's comment with the exact sign
-   phrase. A plain new comment doesn't count.
+   phrase.
 4. The bot saves the signature (in `fossasia/cla-signatures`) and re-checks
    the PR. Once everyone has signed, the check turns green.
 5. Since the signature list is shared across the whole org, signing once

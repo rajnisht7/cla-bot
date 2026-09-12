@@ -139,7 +139,6 @@ access control from Step 2.
 3. The bot should comment listing the missing signers.
 4. Sign by replying to the bot's comment with exactly:
    `I have read the CLA Document and I hereby sign the CLA`.
-   A plain new comment will not count.
 5. Confirm a new entry showed up in `cla-signatures`.
 6. **Impersonation test**: on a different PR, reply to the bot's comment
    with the sign phrase from a third account and check the PR does _not_

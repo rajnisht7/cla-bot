@@ -906,8 +906,6 @@ async function checkPR(prNumber, headSha) {
       "",
       `> ${SIGN_PHRASE}`,
       "",
-      "A plain new comment that doesn't quote this one will not be accepted.",
-      "",
       "Signing once covers **all** FOSSASIA repositories - you will not be asked again.",
     );
   }
@@ -950,43 +948,38 @@ function isPrivileged(payload, commenter) {
   return ["OWNER", "MEMBER", "COLLABORATOR"].includes(association);
 }
 
-// A sign-phrase comment only counts as a sign if it's shown to be a reply
-// to this bot's own comment - see handleIssueComment() below for why.
-// GitHub's Conversation tab has no real reply/thread id on issue_comment
-// webhooks (a roadmap request for that was closed as "not planned" - see
-// github/roadmap#552), so "reply" is approximated the only way the raw text
-// makes possible: a leading blockquoted block that itself quotes
-// BOT_MARKER. That's exactly what GitHub's own "Quote reply" inserts, and
-// it's also what a contributor gets if they manually quote the comment by
-// hand instead - both produce the same shape, so one check covers both.
-function isQuotedBotReply(rawBody) {
-  return rawBody.split("\n").some((line) => {
-    const trimmed = line.trimStart();
-    if (!trimmed.startsWith(">")) return false;
-    // Strip all leading '>' markers (handles a nested quote too, e.g. the
-    // sign phrase in our own comment is itself already inside a '>' block,
-    // so quoting our whole comment back to us produces '> > ...' there).
-    return trimmed.replace(/^(>\s?)+/, "").includes(BOT_MARKER);
-  });
-}
-
-// The part of the comment the contributor actually typed themselves: GitHub
-// (and a contributor manually mimicking the same shape) puts the quoted
-// block first and the new text below it, so this strips the leading run of
-// blank/quoted lines from the very start of the comment and returns
-// whatever's left, trimmed.
-function replyText(rawBody) {
+// A sign-phrase comment only counts as a sign if it's shown to be a reply -
+// see handleIssueComment() below for why. GitHub's Conversation tab has no
+// real reply/thread id on issue_comment webhooks (a roadmap request for
+// that was closed as "not planned" - see github/roadmap#552), so "reply" is
+// approximated structurally instead: GitHub's own "Quote reply" always
+// '>'-prefixes every line of the quoted comment before the contributor's
+// new text, and a contributor manually quoting by hand produces the same
+// shape - so requiring a leading blockquote block covers both.
+//
+// This deliberately does NOT try to verify *what* got quoted (e.g. by
+// matching our BOT_MARKER inside it, which an earlier version of this
+// function did). In production, GitHub's "Quote reply" was observed to
+// silently drop the HTML-comment marker line while still preserving the
+// rest of our comment's markdown - so matching on any particular substring
+// of our own comment is unreliable. A leading quote block, regardless of
+// its content, is the only structural signal GitHub reliably gives us.
+function extractReply(rawBody) {
   const lines = rawBody.split("\n");
+  let hasLeadingQuote = false;
   let i = 0;
   while (i < lines.length) {
     const trimmed = lines[i].trimStart();
-    if (trimmed === "" || trimmed.startsWith(">")) {
+    if (trimmed.startsWith(">")) {
+      hasLeadingQuote = true;
+      i++;
+    } else if (trimmed === "") {
       i++;
     } else {
       break;
     }
   }
-  return lines.slice(i).join("\n").trim();
+  return { isReply: hasLeadingQuote, text: lines.slice(i).join("\n").trim() };
 }
 
 async function handleIssueComment(payload) {
@@ -1011,13 +1004,12 @@ async function handleIssueComment(payload) {
   const body = rawBody.trim();
   const commenter = payload.comment.user.login;
 
-  // Must be a reply (quoting this bot's comment - see isQuotedBotReply())
-  // whose own typed text is exactly the sign phrase - a bare new comment
-  // that just happens to say the phrase, with nothing quoted, is ignored.
-  if (
-    isQuotedBotReply(rawBody) &&
-    replyText(rawBody).toLowerCase() === SIGN_PHRASE.toLowerCase()
-  ) {
+  // Must be a reply (a leading blockquote block - see extractReply()) whose
+  // own typed text is exactly the sign phrase - a bare new comment that
+  // just happens to say the phrase, with nothing quoted above it, is
+  // ignored.
+  const reply = extractReply(rawBody);
+  if (reply.isReply && reply.text.toLowerCase() === SIGN_PHRASE.toLowerCase()) {
     const sigToken = await getSignaturesToken();
     // The webhook already carries the commenter's numeric id - recording
     // that, not just the login, is what lets the signature survive a later
@@ -1155,6 +1147,5 @@ module.exports = {
   lockPR,
   assertValidPRNumber,
   assertValidSha,
-  isQuotedBotReply,
-  replyText,
+  extractReply,
 };

@@ -23,8 +23,7 @@ const {
   isPrivileged,
   assertValidPRNumber,
   assertValidSha,
-  isQuotedBotReply,
-  replyText,
+  extractReply,
 } = require("../src/cla-bot.js");
 
 let passed = 0;
@@ -590,99 +589,107 @@ test("assertValidSha accepts exactly 64 characters (the sha256 boundary) but rej
   );
 });
 
-// --- isQuotedBotReply / replyText: the quoted-reply sign gate -------------
+// --- extractReply: the quoted-reply sign gate ------------------------------
 // GitHub's Conversation tab has no real reply/thread id on issue_comment
-// webhooks, so a "reply" is approximated as a leading blockquoted block
-// that itself quotes BOT_MARKER (see the design note above
-// isQuotedBotReply() in src/cla-bot.js). These are pure-function unit tests
-// of that matching, independent of the full handleIssueComment() wiring
-// (which is covered separately, end-to-end, in test/integration.test.js).
-const BOT_MARKER = "<!-- fossasia-cla-bot:v1 -->";
+// webhooks, so a "reply" is approximated structurally as a leading
+// blockquote block, regardless of its content (see the design note above
+// extractReply() in src/cla-bot.js). An earlier version of this matched on
+// a bot marker string inside the quote instead - that broke in production
+// because GitHub's real "Quote reply" silently drops HTML comments from the
+// quoted text (see the last two tests below, which reproduce that exact
+// failure and its fix). These are pure-function unit tests of the matching,
+// independent of the full handleIssueComment() wiring (which is covered
+// separately, end-to-end, in test/integration.test.js).
 
-test("isQuotedBotReply is true when a quoted line contains the bot marker", () => {
-  assert.strictEqual(
-    isQuotedBotReply(`> ${BOT_MARKER}\n\nI have read the CLA`),
-    true,
+test("extractReply: isReply is true when there's a leading quoted line, whatever it contains", () => {
+  const { isReply } = extractReply("> anything at all\n\nI have read the CLA");
+  assert.strictEqual(isReply, true);
+});
+
+test("extractReply: isReply is false when there is no quoted line at all", () => {
+  const { isReply } = extractReply(
+    "I have read the CLA Document and I hereby sign the CLA",
   );
+  assert.strictEqual(isReply, false);
 });
 
-test("isQuotedBotReply is false when there is no quoted line at all", () => {
-  assert.strictEqual(
-    isQuotedBotReply("I have read the CLA Document and I hereby sign the CLA"),
-    false,
+test("extractReply: isReply is true for a nested/double-quoted line", () => {
+  const { isReply } = extractReply("> > some quoted text\n\ntext");
+  assert.strictEqual(isReply, true);
+});
+
+test("extractReply: isReply is true when the '>' is preceded by leading whitespace", () => {
+  const { isReply } = extractReply("   > quoted line");
+  assert.strictEqual(isReply, true);
+});
+
+test("extractReply: isReply is false for an empty body", () => {
+  const { isReply } = extractReply("");
+  assert.strictEqual(isReply, false);
+});
+
+test("extractReply: text is the trimmed whole body when there is no leading quote block at all", () => {
+  const { text } = extractReply(
+    "  I have read the CLA Document and I hereby sign the CLA  ",
   );
-});
-
-test("isQuotedBotReply is false when a quoted line exists but does not contain the bot marker", () => {
   assert.strictEqual(
-    isQuotedBotReply("> just some other quoted text\n\nI have read the CLA"),
-    false,
-  );
-});
-
-test("isQuotedBotReply is false when the marker text appears WITHOUT a leading '>' - pasting the raw marker is not the same as quoting it", () => {
-  assert.strictEqual(
-    isQuotedBotReply(`${BOT_MARKER}\n\nI have read the CLA`),
-    false,
-  );
-});
-
-test("isQuotedBotReply is true for a nested/double-quoted marker line (quoting a comment that already quoted something)", () => {
-  assert.strictEqual(isQuotedBotReply(`> > ${BOT_MARKER}\n\ntext`), true);
-});
-
-test("isQuotedBotReply is true when the '>' is preceded by leading whitespace", () => {
-  assert.strictEqual(isQuotedBotReply(`   > ${BOT_MARKER}`), true);
-});
-
-test("isQuotedBotReply is true when the marker line is not the first line of the comment", () => {
-  assert.strictEqual(
-    isQuotedBotReply(`> some other quoted line\n> ${BOT_MARKER}\n\ntext`),
-    true,
-  );
-});
-
-test("isQuotedBotReply is false for an empty body", () => {
-  assert.strictEqual(isQuotedBotReply(""), false);
-});
-
-test("replyText returns the trimmed whole body when there is no leading quote block at all", () => {
-  assert.strictEqual(
-    replyText("  I have read the CLA Document and I hereby sign the CLA  "),
+    text,
     "I have read the CLA Document and I hereby sign the CLA",
   );
 });
 
-test("replyText strips a single-line leading quote block", () => {
-  assert.strictEqual(replyText("> quoted line\n\nreply text"), "reply text");
+test("extractReply: text strips a single-line leading quote block", () => {
+  const { text } = extractReply("> quoted line\n\nreply text");
+  assert.strictEqual(text, "reply text");
 });
 
-test("replyText strips a multi-line leading quote block, including blank '>' continuation lines inside it", () => {
+test("extractReply: text strips a multi-line leading quote block, including blank '>' continuation lines inside it", () => {
+  const { text } = extractReply("> line1\n>\n> line2\n\nreply text");
+  assert.strictEqual(text, "reply text");
+});
+
+test("extractReply: text treats a blank line with no '>' prefix as still part of the leading quote/skip region", () => {
+  const { text } = extractReply("> quoted\n\n\nreply text");
+  assert.strictEqual(text, "reply text");
+});
+
+test("extractReply: text is an empty string when the whole body is quoted with nothing typed afterward", () => {
+  const { text } = extractReply("> quoted line\n> another quoted line");
+  assert.strictEqual(text, "");
+});
+
+test("extractReply: text does NOT strip a quote block that comes after the reply text - only a LEADING quote block counts", () => {
+  const { text } = extractReply("reply text\n\n> quoted line");
+  assert.strictEqual(text, "reply text\n\n> quoted line");
+});
+
+test("extractReply: text only trims the outer edges, preserving internal formatting of the actual reply", () => {
+  const { text } = extractReply("> q\n\nline one\nline two  ");
+  assert.strictEqual(text, "line one\nline two");
+});
+
+test("extractReply: regression - a real GitHub 'Quote reply' body (HTML comment marker dropped, rest of markdown intact) is still recognized as a reply and signs", () => {
+  // Captured verbatim from a real cla-testing PR: GitHub's Quote reply
+  // preserved bold/link markdown and the nested blockquote, but dropped the
+  // "<!-- fossasia-cla-bot:v1 -->" line entirely - which is exactly what
+  // broke the old marker-matching approach.
+  const realWorldQuoteReplyBody =
+    "> The following contributor(s) need to sign our [CLA](https://github.com/rajnishtiwari7/cla-testing/blob/main/README.md) before this PR can be merged:\n" +
+    "> \n" +
+    "> * @rajnishtiwari7\n" +
+    "> \n" +
+    "> To sign, **reply to this comment** with **exactly** the following text:\n" +
+    "> \n" +
+    "> > I have read the CLA Document and I hereby sign the CLA\n" +
+    "> \n" +
+    "> Signing once covers **all** FOSSASIA repositories - you will not be asked again.\n" +
+    "\n" +
+    "I have read the CLA Document and I hereby sign the CLA";
+  const { isReply, text } = extractReply(realWorldQuoteReplyBody);
+  assert.strictEqual(isReply, true);
   assert.strictEqual(
-    replyText("> line1\n>\n> line2\n\nreply text"),
-    "reply text",
-  );
-});
-
-test("replyText treats a blank line with no '>' prefix as still part of the leading quote/skip region", () => {
-  assert.strictEqual(replyText("> quoted\n\n\nreply text"), "reply text");
-});
-
-test("replyText returns an empty string when the whole body is quoted with nothing typed afterward", () => {
-  assert.strictEqual(replyText("> quoted line\n> another quoted line"), "");
-});
-
-test("replyText does NOT strip a quote block that comes after the reply text - only a LEADING quote block counts", () => {
-  assert.strictEqual(
-    replyText("reply text\n\n> quoted line"),
-    "reply text\n\n> quoted line",
-  );
-});
-
-test("replyText only trims the outer edges, preserving internal formatting of the actual reply", () => {
-  assert.strictEqual(
-    replyText("> q\n\nline one\nline two  "),
-    "line one\nline two",
+    text,
+    "I have read the CLA Document and I hereby sign the CLA",
   );
 });
 
