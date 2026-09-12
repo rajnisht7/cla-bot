@@ -1153,11 +1153,8 @@ module.exports = {
   postComment,
   validateConfig,
   lockPR,
-  // Exported for tests only, same as everything above - not part of the
-  // action's public contract. Covered directly in test/logic.test.js so a
-  // future change to either validator's character rules (e.g. UNSAFE_URL_
-  // SEGMENT_RE) fails immediately and specifically, rather than only being
-  // caught indirectly through the webhook-handler integration tests.
   assertValidPRNumber,
   assertValidSha,
+  isQuotedBotReply,
+  replyText,
 };
