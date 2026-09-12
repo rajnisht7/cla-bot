@@ -215,7 +215,10 @@ function makeFakeGitHub({
       issue: { number: 1, pull_request: {}, user: { login: "alice" } },
       comment: {
         user: { id: 1001, login: "alice" },
-        body: "I have read the CLA Document and I hereby sign the CLA",
+        // Simulates GitHub's "Quote reply" (or a contributor manually
+        // quoting the bot's comment): a leading '>' block quoting the
+        // bot's marker, then the sign phrase below it.
+        body: "> <!-- fossasia-cla-bot:v1 -->\n> Please comment on this PR to sign.\n\nI have read the CLA Document and I hereby sign the CLA",
         html_url: "https://github.com/fossasia/testrepo/pull/1#issuecomment-1",
         author_association: "NONE",
       },
@@ -262,7 +265,7 @@ function makeFakeGitHub({
       issue: { number: 1, pull_request: {}, user: { login: "real-author" } },
       comment: {
         user: { id: 9999, login: "random-commenter" }, // NOT the commit author
-        body: "I have read the CLA Document and I hereby sign the CLA",
+        body: "> <!-- fossasia-cla-bot:v1 -->\n> Please comment on this PR to sign.\n\nI have read the CLA Document and I hereby sign the CLA",
         html_url: "https://github.com/fossasia/testrepo/pull/1#issuecomment-2",
         author_association: "NONE",
       },
@@ -886,7 +889,7 @@ function makeFakeGitHub({
       issue: { number: 1, pull_request: {}, user: { login: "alice" } },
       comment: {
         user: { id: 8001, login: "alice" },
-        body: "I have read the CLA Document and I hereby sign the CLA",
+        body: "> <!-- fossasia-cla-bot:v1 -->\n> Please comment on this PR to sign.\n\nI have read the CLA Document and I hereby sign the CLA",
         html_url: "x",
         author_association: "NONE",
       },
