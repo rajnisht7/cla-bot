@@ -179,13 +179,41 @@ function parseGitHubServerUrl(serverUrl) {
     server = new URL(serverUrl);
   } catch {
     throw new Error(
-      "GITHUB_SERVER_URL must be an HTTP(S) URL without credentials",
+      "GITHUB_SERVER_URL must be an HTTPS URL without credentials",
     );
   }
-  if (!/^https?:$/.test(server.protocol) || server.username || server.password) {
-    throw new Error("GITHUB_SERVER_URL must be an HTTP(S) URL without credentials");
+  if (server.protocol !== "https:" || server.username || server.password) {
+    throw new Error("GITHUB_SERVER_URL must be an HTTPS URL without credentials");
   }
   return server;
+}
+
+function parseGitHubApiUrl(apiUrl) {
+  try {
+    if (
+      typeof apiUrl !== "string" ||
+      apiUrl.length === 0 ||
+      apiUrl.includes("?") ||
+      apiUrl.includes("#")
+    ) {
+      throw new Error("invalid API base");
+    }
+    const base = new URL(apiUrl);
+    if (
+      base.protocol !== "https:" ||
+      base.username ||
+      base.password ||
+      base.search ||
+      base.hash
+    ) {
+      throw new Error("invalid API base");
+    }
+    return base;
+  } catch {
+    throw new Error(
+      "GITHUB_API_URL must be an absolute HTTPS URL without credentials, query, or fragment.",
+    );
+  }
 }
 
 function buildCommentUrl(prNumber, commentId, serverUrl = GITHUB_SERVER_URL) {
@@ -391,6 +419,11 @@ function validateConfig() {
   } catch (error) {
     fail(error.message);
   }
+  try {
+    parseGitHubApiUrl(GITHUB_API);
+  } catch (error) {
+    fail(error.message);
+  }
 
   // Fail fast on config typos instead of a vague API error later.
   if (!GITHUB_LOGIN_RE.test(SIG_OWNER)) {
@@ -416,16 +449,21 @@ function validateConfig() {
       `SIG_PATH ${JSON.stringify(SIG_PATH)} is not a valid path within the signatures repo: ${sigPathProblem}.`,
     );
   }
+  let claDocumentUrl;
   try {
-    const parsed = new URL(CLA_DOCUMENT_URL);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      fail(
-        `CLA_DOCUMENT_URL ${JSON.stringify(CLA_DOCUMENT_URL)} must be an http(s) URL.`,
-      );
-    }
+    claDocumentUrl = new URL(CLA_DOCUMENT_URL);
   } catch {
     fail(
       `CLA_DOCUMENT_URL ${JSON.stringify(CLA_DOCUMENT_URL)} is not a valid URL.`,
+    );
+  }
+  if (
+    claDocumentUrl.protocol !== "https:" ||
+    claDocumentUrl.username ||
+    claDocumentUrl.password
+  ) {
+    fail(
+      `CLA_DOCUMENT_URL ${JSON.stringify(CLA_DOCUMENT_URL)} must be an HTTPS URL without credentials.`,
     );
   }
   // Say so when normalization changed the value.
@@ -516,7 +554,7 @@ function buildSafeApiUrl(path, apiBase = GITHUB_API) {
   };
   const rejectBase = () => {
     throw new Error(
-      "GITHUB_API_URL must be an absolute HTTP(S) URL without credentials, query, or fragment.",
+      "GITHUB_API_URL must be an absolute HTTPS URL without credentials, query, or fragment.",
     );
   };
   if (
@@ -529,14 +567,6 @@ function buildSafeApiUrl(path, apiBase = GITHUB_API) {
   ) {
     reject();
   }
-  if (
-    typeof apiBase !== "string" ||
-    apiBase.length === 0 ||
-    apiBase.includes("?") ||
-    apiBase.includes("#")
-  ) {
-    rejectBase();
-  }
   const requestPath = path.split("?", 1)[0];
   for (const segment of requestPath.split("/")) {
     // The URL parser treats encoded dot segments as path navigation too.
@@ -546,17 +576,8 @@ function buildSafeApiUrl(path, apiBase = GITHUB_API) {
 
   let base;
   try {
-    base = new URL(apiBase);
+    base = parseGitHubApiUrl(apiBase);
   } catch {
-    rejectBase();
-  }
-  if (
-    (base.protocol !== "http:" && base.protocol !== "https:") ||
-    base.username ||
-    base.password ||
-    base.search ||
-    base.hash
-  ) {
     rejectBase();
   }
 
@@ -592,6 +613,10 @@ async function ghRaw(path, token, options = {}) {
   try {
     const res = await fetch(requestUrl, {
       ...fetchOptions,
+      // API responses contain trusted signature and identity data. Do not
+      // let a server or intermediary redirect credentials or responses to a
+      // different origin, or downgrade the request to plaintext.
+      redirect: "error",
       signal: controller.signal,
       headers: {
         Authorization: `Bearer ${token}`,

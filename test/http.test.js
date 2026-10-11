@@ -76,11 +76,6 @@ function fakeResponse(status, jsonBody, headers = {}) {
         "/repos/owner/repo/issues/1",
         "https://ghe.example.test/api/v3/repos/owner/repo/issues/1",
       ],
-      [
-        "http://ghe.example.test/api/v3",
-        "/repos/owner/repo/issues/1",
-        "http://ghe.example.test/api/v3/repos/owner/repo/issues/1",
-      ],
     ];
     for (const [base, path, expected] of cases) {
       const url = buildSafeApiUrl(path, base);
@@ -138,6 +133,7 @@ function fakeResponse(status, jsonBody, headers = {}) {
 
     for (const badBase of [
       "file:///tmp/api",
+      "http://ghe.example.test/api/v3",
       "https://user:secret@ghe.example.test/api/v3",
       "https://ghe.example.test/api/v3?query=1",
       "https://ghe.example.test/api/v3?",
@@ -235,6 +231,24 @@ function fakeResponse(status, jsonBody, headers = {}) {
         new URL(sentUrl).origin,
         new URL(process.env.GITHUB_API_URL || "https://api.github.com").origin,
       );
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  await test("ghRaw rejects redirects instead of trusting redirected API responses", async () => {
+    const originalFetch = global.fetch;
+    let calls = 0;
+    global.fetch = async (_url, options) => {
+      calls += 1;
+      assert.strictEqual(options.redirect, "error");
+      // Model fetch's redirect:error behavior: the redirect response is
+      // rejected before its destination or body can be trusted.
+      throw new TypeError("fetch failed: redirect mode is error");
+    };
+    try {
+      await assert.rejects(ghRaw("/repos/owner/repo", "tok"), /redirect mode is error/);
+      assert.strictEqual(calls, 1);
     } finally {
       global.fetch = originalFetch;
     }
